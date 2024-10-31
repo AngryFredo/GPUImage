@@ -59,7 +59,9 @@
     {
 		return nil;
     }
-    
+#pragma mark GPU源码修改
+    self.viewBounds = self.bounds;
+
     [self commonInit];
     
     return self;
@@ -132,16 +134,16 @@
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    
+#pragma mark GPU源码修改
+    self.viewBounds = self.bounds;
     // The frame buffer needs to be trashed and re-created when the view size changes.
     if (!CGSizeEqualToSize(self.bounds.size, boundsSizeAtFrameBufferEpoch) &&
         !CGSizeEqualToSize(self.bounds.size, CGSizeZero)) {
         runSynchronouslyOnVideoProcessingQueue(^{
             [self destroyDisplayFramebuffer];
             [self createDisplayFramebuffer];
+            [self recalculateViewGeometry];
         });
-    } else if (!CGSizeEqualToSize(self.bounds.size, CGSizeZero)) {
-        [self recalculateViewGeometry];
     }
 }
 
@@ -185,11 +187,9 @@
 
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, displayRenderbuffer);
 	
-    __unused GLuint framebufferCreationStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    GLuint framebufferCreationStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     NSAssert(framebufferCreationStatus == GL_FRAMEBUFFER_COMPLETE, @"Failure with display framebuffer generation for display of size: %f, %f", self.bounds.size.width, self.bounds.size.height);
     boundsSizeAtFrameBufferEpoch = self.bounds.size;
-
-    [self recalculateViewGeometry];
 }
 
 - (void)destroyDisplayFramebuffer;
@@ -235,13 +235,16 @@
     runSynchronouslyOnVideoProcessingQueue(^{
         CGFloat heightScaling, widthScaling;
         
-        CGSize currentViewSize = self.bounds.size;
-        
+#pragma mark GPU源码修改
+        CGSize currentViewSize = self.viewBounds.size;//self.bounds.size
+
+
         //    CGFloat imageAspectRatio = inputImageSize.width / inputImageSize.height;
         //    CGFloat viewAspectRatio = currentViewSize.width / currentViewSize.height;
         
-        CGRect insetRect = AVMakeRectWithAspectRatioInsideRect(inputImageSize, self.bounds);
-        
+#pragma mark GPU源码修改
+        CGRect insetRect = AVMakeRectWithAspectRatioInsideRect(inputImageSize, self.viewBounds);//self.bounds
+
         switch(_fillMode)
         {
             case kGPUImageFillModeStretch:
@@ -340,10 +343,10 @@
     };
     
     static const GLfloat rotateRightHorizontalFlipTextureCoordinates[] = {
-        0.0f, 1.0f,
-        0.0f, 0.0f,
         1.0f, 1.0f,
         1.0f, 0.0f,
+        0.0f, 1.0f,
+        0.0f, 0.0f,
     };
 
     static const GLfloat rotate180TextureCoordinates[] = {

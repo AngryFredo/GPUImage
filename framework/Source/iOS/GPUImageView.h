@@ -17,6 +17,10 @@ typedef NS_ENUM(NSUInteger, GPUImageFillModeType) {
     GPUImageRotationMode inputRotation;
 }
 
+#pragma mark - [MODIFICATION]
+///解决首次启动很慢的问题
+@property (nonatomic, assign) CGRect viewBounds;
+
 /** The fill mode dictates how images are fit in the view, with the default being kGPUImageFillModePreserveAspectRatio
  */
 @property(readwrite, nonatomic) GPUImageFillModeType fillMode;
