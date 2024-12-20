@@ -2,20 +2,92 @@
 #import "GPUImageMovieWriter.h"
 #import "GPUImageFilter.h"
 
-void setColorConversion601( GLfloat conversionMatrix[9] )
-{
-    kColorConversion601 = conversionMatrix;
-}
+// Color Conversion Constants (YUV to RGB) including adjustment from 16-235/16-240 (video range)
 
-void setColorConversion601FullRange( GLfloat conversionMatrix[9] )
-{
-    kColorConversion601FullRange = conversionMatrix;
-}
+// BT.601, which is the standard for SDTV.
+const GLfloat kColorConversion601[] = {
+    1.164,  1.164, 1.164,
+    0.0, -0.392, 2.017,
+    1.596, -0.813,   0.0,
+};
 
-void setColorConversion709( GLfloat conversionMatrix[9] )
-{
-    kColorConversion709 = conversionMatrix;
-}
+// BT.709, which is the standard for HDTV.
+const GLfloat kColorConversion709[] = {
+    1.164,  1.164, 1.164,
+    0.0, -0.213, 2.112,
+    1.793, -0.533,   0.0,
+};
+
+// BT.601 full range (ref: http://www.equasys.de/colorconversion.html)
+const GLfloat kColorConversion601FullRange[] = {
+    1.0,    1.0,    1.0,
+    0.0,    -0.343, 1.765,
+    1.4,    -0.711, 0.0,
+};
+
+NSString *const kGPUImageYUVVideoRangeConversionForRGFragmentShaderString = SHADER_STRING
+(
+ varying highp vec2 textureCoordinate;
+ 
+ uniform sampler2D luminanceTexture;
+ uniform sampler2D chrominanceTexture;
+ uniform mediump mat3 colorConversionMatrix;
+ 
+ void main()
+ {
+     mediump vec3 yuv;
+     lowp vec3 rgb;
+     
+     yuv.x = texture2D(luminanceTexture, textureCoordinate).r;
+     yuv.yz = texture2D(chrominanceTexture, textureCoordinate).rg - vec2(0.5, 0.5);
+     rgb = colorConversionMatrix * yuv;
+     
+     gl_FragColor = vec4(rgb, 1);
+ }
+ );
+
+NSString *const kGPUImageYUVFullRangeConversionForLAFragmentShaderString = SHADER_STRING
+(
+ varying highp vec2 textureCoordinate;
+ 
+ uniform sampler2D luminanceTexture;
+ uniform sampler2D chrominanceTexture;
+ uniform mediump mat3 colorConversionMatrix;
+ 
+ void main()
+ {
+     mediump vec3 yuv;
+     lowp vec3 rgb;
+     
+     yuv.x = texture2D(luminanceTexture, textureCoordinate).r;
+     yuv.yz = texture2D(chrominanceTexture, textureCoordinate).ra - vec2(0.5, 0.5);
+     rgb = colorConversionMatrix * yuv;
+     
+     gl_FragColor = vec4(rgb, 1);
+ }
+ );
+
+NSString *const kGPUImageYUVVideoRangeConversionForLAFragmentShaderString = SHADER_STRING
+(
+ varying highp vec2 textureCoordinate;
+ 
+ uniform sampler2D luminanceTexture;
+ uniform sampler2D chrominanceTexture;
+ uniform mediump mat3 colorConversionMatrix;
+ 
+ void main()
+ {
+     mediump vec3 yuv;
+     lowp vec3 rgb;
+     
+     yuv.x = texture2D(luminanceTexture, textureCoordinate).r - (16.0/255.0);
+     yuv.yz = texture2D(chrominanceTexture, textureCoordinate).ra - vec2(0.5, 0.5);
+     rgb = colorConversionMatrix * yuv;
+     
+     gl_FragColor = vec4(rgb, 1);
+ }
+ );
+
 
 #pragma mark -
 #pragma mark Private methods and instance variables
@@ -41,7 +113,7 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
     BOOL addedAudioInputsDueToEncodingTarget;
 }
 
-- (void)updateOrientationSendToTargets;
+//- (void)updateOrientationSendToTargets;
 - (void)convertYUVToRGBOutput;
 
 @end
@@ -70,7 +142,7 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
     return self;
 }
 
-- (id)initWithSessionPreset:(NSString *)sessionPreset cameraPosition:(AVCaptureDevicePosition)cameraPosition
+- (id)initWithSessionPreset:(NSString *)sessionPreset cameraPosition:(AVCaptureDevicePosition)cameraPosition; 
 {
 	if (!(self = [super init]))
     {
@@ -100,6 +172,7 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
     
 	// Create the capture session
 	_captureSession = [[AVCaptureSession alloc] init];
+	
     [_captureSession beginConfiguration];
     
 	// Add the video input	
@@ -112,12 +185,10 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
 	
 	// Add the video frame output	
 	videoOutput = [[AVCaptureVideoDataOutput alloc] init];
-    [videoOutput setAlwaysDiscardsLateVideoFrames:YES];
-
+	[videoOutput setAlwaysDiscardsLateVideoFrames:NO];
     [videoOutput setVideoSettings:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:kCVPixelFormatType_32BGRA] forKey:(id)kCVPixelBufferPixelFormatTypeKey]];
+
     [videoOutput setSampleBufferDelegate:self queue:cameraProcessingQueue];
-
-
 	if ([_captureSession canAddOutput:videoOutput])
 	{
 		[_captureSession addOutput:videoOutput];
@@ -248,11 +319,6 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
 #pragma mark -
 #pragma mark Manage the camera video stream
 
-- (BOOL)isRunning;
-{
-    return [_captureSession isRunning];
-}
-
 - (void)startCameraCapture;
 {
     if (![_captureSession isRunning])
@@ -297,16 +363,8 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
     {
         currentCameraPosition = AVCaptureDevicePositionBack;
     }
-    
-    AVCaptureDevice *backFacingCamera = nil;
-    NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
-	for (AVCaptureDevice *device in devices) 
-	{
-		if ([device position] == currentCameraPosition)
-		{
-			backFacingCamera = device;
-		}
-	}
+
+    AVCaptureDevice *backFacingCamera = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera mediaType:AVMediaTypeVideo position:currentCameraPosition];
     newVideoInput = [[AVCaptureDeviceInput alloc] initWithDevice:backFacingCamera error:&error];
     
     if (newVideoInput != nil)
@@ -318,6 +376,11 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
         {
             [_captureSession addInput:newVideoInput];
             videoInput = newVideoInput;
+            AVCaptureConnection *connection = [videoOutput connectionWithMediaType:AVMediaTypeVideo];
+            connection.videoOrientation = AVCaptureVideoOrientationPortrait;
+            if (connection.isVideoOrientationSupported && currentCameraPosition == AVCaptureDevicePositionFront) {
+                connection.videoMirrored = YES;
+            }
         }
         else
         {
@@ -484,17 +547,8 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
                 [currentTarget setInputRotation:outputRotation atIndex:textureIndexOfTarget];
                 [currentTarget setInputSize:CGSizeMake(bufferWidth, bufferHeight) atIndex:textureIndexOfTarget];
                 
-                if ([currentTarget wantsMonochromeInput] && captureAsYUV)
-                {
-                    [currentTarget setCurrentlyReceivingMonochromeInput:YES];
-                    // TODO: Replace optimization for monochrome output
-                    [currentTarget setInputFramebuffer:outputFramebuffer atIndex:textureIndexOfTarget];
-                }
-                else
-                {
-                    [currentTarget setCurrentlyReceivingMonochromeInput:NO];
-                    [currentTarget setInputFramebuffer:outputFramebuffer atIndex:textureIndexOfTarget];
-                }
+                [currentTarget setCurrentlyReceivingMonochromeInput:NO];
+                [currentTarget setInputFramebuffer:outputFramebuffer atIndex:textureIndexOfTarget];
             }
             else
             {
@@ -570,157 +624,33 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
 
     [GPUImageContext useImageProcessingContext];
 
-    if ([GPUImageContext supportsFastTextureUpload] && captureAsYUV)
+    CVPixelBufferLockBaseAddress(cameraFrame, 0);
+
+    int bytesPerRow = (int) CVPixelBufferGetBytesPerRow(cameraFrame);
+    outputFramebuffer = [[GPUImageContext sharedFramebufferCache] fetchFramebufferForSize:CGSizeMake(bytesPerRow / 4, bufferHeight) onlyTexture:YES];
+    [outputFramebuffer activateFramebuffer];
+
+    glBindTexture(GL_TEXTURE_2D, [outputFramebuffer texture]);
+
+    //        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bufferWidth, bufferHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, CVPixelBufferGetBaseAddress(cameraFrame));
+
+    // Using BGRA extension to pull in video frame data directly
+    // The use of bytesPerRow / 4 accounts for a display glitch present in preview video frames when using the photo preset on the camera
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bytesPerRow / 4, bufferHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, CVPixelBufferGetBaseAddress(cameraFrame));
+
+    [self updateTargetsForVideoCameraUsingCacheTextureAtWidth:bytesPerRow / 4 height:bufferHeight time:currentTime];
+
+    CVPixelBufferUnlockBaseAddress(cameraFrame, 0);
+
+    if (_runBenchmark)
     {
-        CVOpenGLESTextureRef luminanceTextureRef = NULL;
-        CVOpenGLESTextureRef chrominanceTextureRef = NULL;
-
-//        if (captureAsYUV && [GPUImageContext deviceSupportsRedTextures])
-        if (CVPixelBufferGetPlaneCount(cameraFrame) > 0) // Check for YUV planar inputs to do RGB conversion
+        numberOfFramesCaptured++;
+        if (numberOfFramesCaptured > INITIALFRAMESTOIGNOREFORBENCHMARK)
         {
-            CVPixelBufferLockBaseAddress(cameraFrame, 0);
-            
-            if ( (imageBufferWidth != bufferWidth) && (imageBufferHeight != bufferHeight) )
-            {
-                imageBufferWidth = bufferWidth;
-                imageBufferHeight = bufferHeight;
-            }
-            
-            CVReturn err;
-            // Y-plane
-            glActiveTexture(GL_TEXTURE4);
-            if ([GPUImageContext deviceSupportsRedTextures])
-            {
-//                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, coreVideoTextureCache, cameraFrame, NULL, GL_TEXTURE_2D, GL_RED_EXT, bufferWidth, bufferHeight, GL_RED_EXT, GL_UNSIGNED_BYTE, 0, &luminanceTextureRef);
-                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, [[GPUImageContext sharedImageProcessingContext] coreVideoTextureCache], cameraFrame, NULL, GL_TEXTURE_2D, GL_LUMINANCE, bufferWidth, bufferHeight, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, &luminanceTextureRef);
-            }
-            else
-            {
-                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, [[GPUImageContext sharedImageProcessingContext] coreVideoTextureCache], cameraFrame, NULL, GL_TEXTURE_2D, GL_LUMINANCE, bufferWidth, bufferHeight, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, &luminanceTextureRef);
-            }
-            if (err)
-            {
-                NSLog(@"Error at CVOpenGLESTextureCacheCreateTextureFromImage %d", err);
-            }
-            
-            luminanceTexture = CVOpenGLESTextureGetName(luminanceTextureRef);
-            glBindTexture(GL_TEXTURE_2D, luminanceTexture);
-            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            
-            // UV-plane
-            glActiveTexture(GL_TEXTURE5);
-            if ([GPUImageContext deviceSupportsRedTextures])
-            {
-//                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, coreVideoTextureCache, cameraFrame, NULL, GL_TEXTURE_2D, GL_RG_EXT, bufferWidth/2, bufferHeight/2, GL_RG_EXT, GL_UNSIGNED_BYTE, 1, &chrominanceTextureRef);
-                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, [[GPUImageContext sharedImageProcessingContext] coreVideoTextureCache], cameraFrame, NULL, GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, bufferWidth/2, bufferHeight/2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 1, &chrominanceTextureRef);
-            }
-            else
-            {
-                err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, [[GPUImageContext sharedImageProcessingContext] coreVideoTextureCache], cameraFrame, NULL, GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, bufferWidth/2, bufferHeight/2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 1, &chrominanceTextureRef);
-            }
-            if (err)
-            {
-                NSLog(@"Error at CVOpenGLESTextureCacheCreateTextureFromImage %d", err);
-            }
-            
-            chrominanceTexture = CVOpenGLESTextureGetName(chrominanceTextureRef);
-            glBindTexture(GL_TEXTURE_2D, chrominanceTexture);
-            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            
-//            if (!allTargetsWantMonochromeData)
-//            {
-                [self convertYUVToRGBOutput];
-//            }
-
-            int rotatedImageBufferWidth = bufferWidth, rotatedImageBufferHeight = bufferHeight;
-            
-            if (GPUImageRotationSwapsWidthAndHeight(internalRotation))
-            {
-                rotatedImageBufferWidth = bufferHeight;
-                rotatedImageBufferHeight = bufferWidth;
-            }
-            
-            [self updateTargetsForVideoCameraUsingCacheTextureAtWidth:rotatedImageBufferWidth height:rotatedImageBufferHeight time:currentTime];
-            
-            CVPixelBufferUnlockBaseAddress(cameraFrame, 0);
-            CFRelease(luminanceTextureRef);
-            CFRelease(chrominanceTextureRef);
-        }
-        else
-        {
-            // TODO: Mesh this with the output framebuffer structure
-            
-//            CVPixelBufferLockBaseAddress(cameraFrame, 0);
-//            
-//            CVReturn err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, [[GPUImageContext sharedImageProcessingContext] coreVideoTextureCache], cameraFrame, NULL, GL_TEXTURE_2D, GL_RGBA, bufferWidth, bufferHeight, GL_BGRA, GL_UNSIGNED_BYTE, 0, &texture);
-//            
-//            if (!texture || err) {
-//                NSLog(@"Camera CVOpenGLESTextureCacheCreateTextureFromImage failed (error: %d)", err);
-//                NSAssert(NO, @"Camera failure");
-//                return;
-//            }
-//            
-//            outputTexture = CVOpenGLESTextureGetName(texture);
-//            //        glBindTexture(CVOpenGLESTextureGetTarget(texture), outputTexture);
-//            glBindTexture(GL_TEXTURE_2D, outputTexture);
-//            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-//            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-//            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-//            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-//            
-//            [self updateTargetsForVideoCameraUsingCacheTextureAtWidth:bufferWidth height:bufferHeight time:currentTime];
-//
-//            CVPixelBufferUnlockBaseAddress(cameraFrame, 0);
-//            CFRelease(texture);
-//
-//            outputTexture = 0;
-        }
-        
-        
-        if (_runBenchmark)
-        {
-            numberOfFramesCaptured++;
-            if (numberOfFramesCaptured > INITIALFRAMESTOIGNOREFORBENCHMARK)
-            {
-                CFAbsoluteTime currentFrameTime = (CFAbsoluteTimeGetCurrent() - startTime);
-                totalFrameTimeDuringCapture += currentFrameTime;
-                NSLog(@"Average frame time : %f ms", [self averageFrameDurationDuringCapture]);
-                NSLog(@"Current frame time : %f ms", 1000.0 * currentFrameTime);
-            }
+            CFAbsoluteTime currentFrameTime = (CFAbsoluteTimeGetCurrent() - startTime);
+            totalFrameTimeDuringCapture += currentFrameTime;
         }
     }
-    else
-    {
-        CVPixelBufferLockBaseAddress(cameraFrame, 0);
-        
-        int bytesPerRow = (int) CVPixelBufferGetBytesPerRow(cameraFrame);
-        outputFramebuffer = [[GPUImageContext sharedFramebufferCache] fetchFramebufferForSize:CGSizeMake(bytesPerRow / 4, bufferHeight) onlyTexture:YES];
-        [outputFramebuffer activateFramebuffer];
-
-        glBindTexture(GL_TEXTURE_2D, [outputFramebuffer texture]);
-        
-        //        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bufferWidth, bufferHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, CVPixelBufferGetBaseAddress(cameraFrame));
-        
-        // Using BGRA extension to pull in video frame data directly
-        // The use of bytesPerRow / 4 accounts for a display glitch present in preview video frames when using the photo preset on the camera
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bytesPerRow / 4, bufferHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, CVPixelBufferGetBaseAddress(cameraFrame));
-        
-        [self updateTargetsForVideoCameraUsingCacheTextureAtWidth:bytesPerRow / 4 height:bufferHeight time:currentTime];
-        
-        CVPixelBufferUnlockBaseAddress(cameraFrame, 0);
-        
-        if (_runBenchmark)
-        {
-            numberOfFramesCaptured++;
-            if (numberOfFramesCaptured > INITIALFRAMESTOIGNOREFORBENCHMARK)
-            {
-                CFAbsoluteTime currentFrameTime = (CFAbsoluteTimeGetCurrent() - startTime);
-                totalFrameTimeDuringCapture += currentFrameTime;
-            }
-        }
-    }  
 }
 
 - (void)processAudioSampleBuffer:(CMSampleBufferRef)sampleBuffer;
@@ -734,7 +664,7 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
 
     int rotatedImageBufferWidth = imageBufferWidth, rotatedImageBufferHeight = imageBufferHeight;
 
-    if (GPUImageRotationSwapsWidthAndHeight(internalRotation))
+    if (GPUImageRotationSwapsWidthAndHeight(kGPUImageNoRotation))
     {
         rotatedImageBufferWidth = imageBufferHeight;
         rotatedImageBufferHeight = imageBufferWidth;
@@ -836,145 +766,23 @@ void setColorConversion709( GLfloat conversionMatrix[9] )
     [super setAudioEncodingTarget:newValue];
 }
 
-- (void)updateOrientationSendToTargets;
-{
-    runSynchronouslyOnVideoProcessingQueue(^{
-        
-        //    From the iOS 5.0 release notes:
-        //    In previous iOS versions, the front-facing camera would always deliver buffers in AVCaptureVideoOrientationLandscapeLeft and the back-facing camera would always deliver buffers in AVCaptureVideoOrientationLandscapeRight.
-        
-        if (captureAsYUV && [GPUImageContext supportsFastTextureUpload])
-        {
-            outputRotation = kGPUImageNoRotation;
-            if ([self cameraPosition] == AVCaptureDevicePositionBack)
-            {
-                if (_horizontallyMirrorRearFacingCamera)
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:internalRotation = kGPUImageRotateRightFlipVertical; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:internalRotation = kGPUImageRotate180; break;
-                        case UIInterfaceOrientationLandscapeLeft:internalRotation = kGPUImageFlipHorizonal; break;
-                        case UIInterfaceOrientationLandscapeRight:internalRotation = kGPUImageFlipVertical; break;
-                        default:internalRotation = kGPUImageNoRotation;
-                    }
-                }
-                else
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:internalRotation = kGPUImageRotateRight; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:internalRotation = kGPUImageRotateLeft; break;
-                        case UIInterfaceOrientationLandscapeLeft:internalRotation = kGPUImageRotate180; break;
-                        case UIInterfaceOrientationLandscapeRight:internalRotation = kGPUImageNoRotation; break;
-                        default:internalRotation = kGPUImageNoRotation;
-                    }
-                }
-            }
-            else
-            {
-                if (_horizontallyMirrorFrontFacingCamera)
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:internalRotation = kGPUImageRotateRightFlipVertical; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:internalRotation = kGPUImageRotateRightFlipHorizontal; break;
-                        case UIInterfaceOrientationLandscapeLeft:internalRotation = kGPUImageFlipHorizonal; break;
-                        case UIInterfaceOrientationLandscapeRight:internalRotation = kGPUImageFlipVertical; break;
-                        default:internalRotation = kGPUImageNoRotation;
-                   }
-                }
-                else
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:internalRotation = kGPUImageRotateRight; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:internalRotation = kGPUImageRotateLeft; break;
-                        case UIInterfaceOrientationLandscapeLeft:internalRotation = kGPUImageNoRotation; break;
-                        case UIInterfaceOrientationLandscapeRight:internalRotation = kGPUImageRotate180; break;
-                        default:internalRotation = kGPUImageNoRotation;
-                    }
-                }
-            }
-        }
-        else
-        {
-            if ([self cameraPosition] == AVCaptureDevicePositionBack)
-            {
-                if (_horizontallyMirrorRearFacingCamera)
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:outputRotation = kGPUImageRotateRightFlipVertical; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:outputRotation = kGPUImageRotate180; break;
-                        case UIInterfaceOrientationLandscapeLeft:outputRotation = kGPUImageFlipHorizonal; break;
-                        case UIInterfaceOrientationLandscapeRight:outputRotation = kGPUImageFlipVertical; break;
-                        default:outputRotation = kGPUImageNoRotation;
-                    }
-                }
-                else
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:outputRotation = kGPUImageRotateRight; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:outputRotation = kGPUImageRotateLeft; break;
-                        case UIInterfaceOrientationLandscapeLeft:outputRotation = kGPUImageRotate180; break;
-                        case UIInterfaceOrientationLandscapeRight:outputRotation = kGPUImageNoRotation; break;
-                        default:outputRotation = kGPUImageNoRotation;
-                    }
-                }
-            }
-            else
-            {
-                if (_horizontallyMirrorFrontFacingCamera)
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:outputRotation = kGPUImageRotateRightFlipVertical; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:outputRotation = kGPUImageRotateRightFlipHorizontal; break;
-                        case UIInterfaceOrientationLandscapeLeft:outputRotation = kGPUImageFlipHorizonal; break;
-                        case UIInterfaceOrientationLandscapeRight:outputRotation = kGPUImageFlipVertical; break;
-                        default:outputRotation = kGPUImageNoRotation;
-                    }
-                }
-                else
-                {
-                    switch(_outputImageOrientation)
-                    {
-                        case UIInterfaceOrientationPortrait:outputRotation = kGPUImageRotateRight; break;
-                        case UIInterfaceOrientationPortraitUpsideDown:outputRotation = kGPUImageRotateLeft; break;
-                        case UIInterfaceOrientationLandscapeLeft:outputRotation = kGPUImageNoRotation; break;
-                        case UIInterfaceOrientationLandscapeRight:outputRotation = kGPUImageRotate180; break;
-                        default:outputRotation = kGPUImageNoRotation;
-                    }
-                }
-            }
-        }
-        
-        for (id<GPUImageInput> currentTarget in targets)
-        {
-            NSInteger indexOfObject = [targets indexOfObject:currentTarget];
-            [currentTarget setInputRotation:outputRotation atIndex:[[targetTextureIndices objectAtIndex:indexOfObject] integerValue]];
-        }
-    });
-}
 
 - (void)setOutputImageOrientation:(UIInterfaceOrientation)newValue;
 {
     _outputImageOrientation = newValue;
-    [self updateOrientationSendToTargets];
+//    [self updateOrientationSendToTargets];
 }
 
 - (void)setHorizontallyMirrorFrontFacingCamera:(BOOL)newValue
 {
     _horizontallyMirrorFrontFacingCamera = newValue;
-    [self updateOrientationSendToTargets];
+//    [self updateOrientationSendToTargets];
 }
 
 - (void)setHorizontallyMirrorRearFacingCamera:(BOOL)newValue
 {
     _horizontallyMirrorRearFacingCamera = newValue;
-    [self updateOrientationSendToTargets];
+//    [self updateOrientationSendToTargets];
 }
 
 @end
